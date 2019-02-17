@@ -51,6 +51,10 @@ namespace gltfio {
 
 using namespace details;
 
+// Converts an array-of-whatever into an array-of-float.
+static void convertToFloat(float* dst, size_t count, const cgltf_attribute* info,
+        const uint8_t* src);
+
 class UrlCache {
 public:
     void* getResource(const char* uri) {
@@ -191,9 +195,8 @@ void* ResourceLoader::loadFile(const BufferBinding& bb) {
 }
 
 void ResourceLoader::computeTangents(const FFilamentAsset* asset) {
-    const auto& nodeMap = asset->mNodeMap;
-
-    UrlMap blobs; // TODO: can the key be const char* ?
+    // Build a map of URI strings to blob pointers. TODO: can the key be const char* ?
+    UrlMap blobs;
     const BufferBinding* bindings = asset->getBufferBindings();
     for (size_t i = 0, n = asset->getBufferBindingCount(); i < n; ++i) {
         auto bb = bindings[i];
@@ -210,13 +213,13 @@ void ResourceLoader::computeTangents(const FFilamentAsset* asset) {
 
     auto computeQuats = [&](const cgltf_primitive& prim) {
 
+        // Iterate through the attributes and find the normals and tangents (if any).
         cgltf_size normalsSlot = 0;
         cgltf_size vertexCount = 0;
         const uint8_t* normalsBlob = nullptr;
         const cgltf_attribute* normalsInfo = nullptr;
         const uint8_t* tangentsBlob = nullptr;
         const cgltf_attribute* tangentsInfo = nullptr;
-
         for (cgltf_size slot = 0; slot < prim.attributes_count; slot++) {
             const cgltf_attribute& attr = prim.attributes[slot];
             vertexCount = attr.data->count;
@@ -233,22 +236,36 @@ void ResourceLoader::computeTangents(const FFilamentAsset* asset) {
                 continue;
             }
         }
-
         if (normalsBlob == nullptr || vertexCount == 0) {
             return;
         }
 
+        // Allocate space for the input and output of the tangent computation.
         fp16Quats.resize(vertexCount);
-        printf("prideout computing %zu quats %p %p\n", vertexCount,
-                normalsBlob, tangentsBlob);
+        fp32Normals.resize(vertexCount);
+        fp32Tangents.resize(tangentsBlob ? vertexCount : 0);
 
-        // TODO: convert (normalsBlob + normalsInfo) into "fp32Normals"
-        // TODO: convert (tangentsBlob + tangentsInfo) into "fpTangents"
-        // TODO: call VertexBuffer::populateTangentQuaternions with HALF4 into "fp16Quats"
-        // TODO: call VertexBuffer::setBufferAt with normalsSlot
+        // TODO: implement convertToFloat
+        convertToFloat(&fp32Normals.data()->x, vertexCount * 3, normalsInfo, normalsBlob);
+        convertToFloat(&fp32Tangents.data()->x, vertexCount * 4, tangentsInfo, tangentsBlob);
+
+        VertexBuffer::QuatTangentContext ctx {
+            .quatType = VertexBuffer::HALF4,
+            .quatCount = vertexCount,
+            .outBuffer = fp16Quats.data(),
+            .normals = fp32Normals.data(),
+            .tangents = fp32Tangents.empty() ? nullptr : fp32Tangents.data()
+        };
+
+        VertexBuffer::populateTangentQuaternions(ctx);
+
+        // TODO: replace the vector with a C array, then pass "free" for the bd callback
+        VertexBuffer::BufferDescriptor bd(fp16Quats.data(), fp16Quats.size());
+        VertexBuffer* vb = asset->mPrimMap[&prim];
+        vb->setBufferAt(*mEngine, normalsSlot, std::move(bd));
     };
 
-    for (auto iter : nodeMap) {
+    for (auto iter : asset->mNodeMap) {
         const cgltf_mesh* mesh = iter.first->mesh;
         if (mesh) {
             cgltf_size nprims = mesh->primitives_count;
@@ -257,6 +274,10 @@ void ResourceLoader::computeTangents(const FFilamentAsset* asset) {
             }
         }
     }
+}
+
+static void convertToFloat(float* dst, size_t count, const cgltf_attribute* info,
+        const uint8_t* src) {
 }
 
 } // namespace gltfio
